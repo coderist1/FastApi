@@ -1,15 +1,53 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from sqlalchemy.orm import Session
+
+from database import SessionLocal, engine, Base
+from models import User, Vehicle, Booking, LogReport
+
+# ---------------------------------------------------------------------------
+# Lifespan: create tables + seed admin
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        if not db.query(User).filter(User.email == "admin@example.com").first():
+            admin = User(
+                email="admin@example.com",
+                username="admin@example.com",
+                password="secret123",
+                firstName="Admin",
+                lastName="User",
+                middleName="",
+                sex="other",
+                dateOfBirth=None,
+                role="admin",
+                active=True,
+            )
+            db.add(admin)
+            db.commit()
+    finally:
+        db.close()
+    yield
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="Car Rental API",
-    description="A FastAPI backend matching the Car Rental frontend API contract.",
+    description="A FastAPI backend for the Car Rental app backed by PostgreSQL.",
     openapi_url="/api/openapi.json",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -17,8 +55,12 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas
+# ---------------------------------------------------------------------------
 
 class LoginRequest(BaseModel):
     username: str
@@ -28,12 +70,12 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     username: str
     password: str
-    firstName: Optional[str] = ''
-    lastName: Optional[str] = ''
-    middleName: Optional[str] = ''
-    sex: Optional[str] = ''
+    firstName: Optional[str] = ""
+    lastName: Optional[str] = ""
+    middleName: Optional[str] = ""
+    sex: Optional[str] = ""
     dateOfBirth: Optional[str] = None
-    role: Optional[str] = 'renter'
+    role: Optional[str] = "renter"   # renter | owner | admin
 
 class UserUpdate(BaseModel):
     firstName: Optional[str] = None
@@ -44,18 +86,18 @@ class UserUpdate(BaseModel):
     active: Optional[bool] = None
 
 class CarPayload(BaseModel):
-    brand: Optional[str] = ''
-    model: Optional[str] = ''
+    brand: Optional[str] = ""
+    model: Optional[str] = ""
     year: Optional[int] = Field(default_factory=lambda: datetime.now().year)
     pricePerDay: Optional[float] = 0.0
     available: Optional[bool] = True
-    image: Optional[str] = ''
-    type: Optional[str] = ''
-    transmission: Optional[str] = ''
-    fuel: Optional[str] = ''
+    image: Optional[str] = ""
+    type: Optional[str] = ""
+    transmission: Optional[str] = ""
+    fuel: Optional[str] = ""
     seats: Optional[int] = None
-    location: Optional[str] = ''
-    description: Optional[str] = ''
+    location: Optional[str] = ""
+    description: Optional[str] = ""
     ownerId: Optional[int] = None
     ownerEmail: Optional[str] = None
 
@@ -65,7 +107,7 @@ class BookingPayload(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     amount: Optional[float] = 0.0
-    status: Optional[str] = 'pending'
+    status: Optional[str] = "pending"
 
 class BookingUpdate(BaseModel):
     vehicle: Optional[int] = None
@@ -78,16 +120,16 @@ class BookingUpdate(BaseModel):
 class LogReportPayload(BaseModel):
     type: str
     vehicleId: int
-    vehicleName: Optional[str] = ''
+    vehicleName: Optional[str] = ""
     rentalId: int
-    renterName: Optional[str] = ''
+    renterName: Optional[str] = ""
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     amount: Optional[float] = 0.0
     issues: Optional[List[str]] = []
-    notes: Optional[str] = ''
-    odometer: Optional[str] = ''
-    fuelLevel: Optional[str] = ''
+    notes: Optional[str] = ""
+    odometer: Optional[str] = ""
+    fuelLevel: Optional[str] = ""
     photos: Optional[List[str]] = []
     customLabels: Optional[Dict[str, Any]] = {}
     checkout: Optional[Dict[str, Any]] = None
@@ -112,12 +154,16 @@ class LogReportUpdate(BaseModel):
     comments: Optional[List[Dict[str, Any]]] = None
 
 class CommentPayload(BaseModel):
-    author: Optional[str] = 'Anonymous'
+    author: Optional[str] = "Anonymous"
     message: str
     createdAt: Optional[str] = None
 
 class ClearBookingsRequest(BaseModel):
     user_id: int
+
+# ---------------------------------------------------------------------------
+# WebSocket connection manager
+# ---------------------------------------------------------------------------
 
 class ConnectionManager:
     def __init__(self):
@@ -135,418 +181,495 @@ class ConnectionManager:
         for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
-            except WebSocketDisconnect:
-                self.disconnect(connection)
-            except Exception:
+            except (WebSocketDisconnect, Exception):
                 self.disconnect(connection)
 
 manager = ConnectionManager()
 
-DB: Dict[str, List[Dict[str, Any]]] = {
-    'users': [],
-    'vehicles': [],
-    'bookings': [],
-    'logreports': [],
-}
-COUNTERS = {
-    'user': 1,
-    'vehicle': 1,
-    'booking': 1,
-    'logreport': 1,
-}
+# ---------------------------------------------------------------------------
+# DB dependency
+# ---------------------------------------------------------------------------
 
-def next_id(name: str) -> int:
-    COUNTERS[name] += 1
-    return COUNTERS[name]
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
+# ---------------------------------------------------------------------------
+# Sanitizers
+# ---------------------------------------------------------------------------
 
-def sanitize_user(user: Dict[str, Any]) -> Dict[str, Any]:
+def sanitize_user(user: User) -> Dict[str, Any]:
     return {
-        'id': user['id'],
-        'email': user['email'],
-        'username': user['username'],
-        'firstName': user.get('firstName', ''),
-        'lastName': user.get('lastName', ''),
-        'middleName': user.get('middleName', ''),
-        'sex': user.get('sex', ''),
-        'dateOfBirth': user.get('dateOfBirth'),
-        'role': user.get('role', 'renter'),
-        'active': user.get('active', True),
-        'fullName': ' '.join(filter(None, [user.get('firstName', ''), user.get('lastName', '')])).strip(),
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "firstName": user.firstName or "",
+        "lastName": user.lastName or "",
+        "middleName": user.middleName or "",
+        "sex": user.sex or "",
+        "dateOfBirth": user.dateOfBirth,
+        "role": user.role or "renter",   # renter | owner | admin
+        "active": user.active,
+        "fullName": " ".join(filter(None, [user.firstName, user.lastName])).strip(),
     }
 
-
-def sanitize_vehicle(vehicle: Dict[str, Any]) -> Dict[str, Any]:
-    result = {
-        **vehicle,
-        'id': vehicle['id'],
-        'pricePerDay': float(vehicle.get('pricePerDay', 0.0)),
-        'price': float(vehicle.get('pricePerDay', 0.0)),
-        'status': 'available' if vehicle.get('available', True) else 'rented',
-        'available': bool(vehicle.get('available', True)),
-    }
-    if not result.get('name') and result.get('model'):
-        result['name'] = result['model']
-    return result
-
-
-def sanitize_booking(booking: Dict[str, Any]) -> Dict[str, Any]:
+def sanitize_vehicle(v: Vehicle) -> Dict[str, Any]:
     return {
-        **booking,
-        'id': booking['id'],
-        'vehicleId': booking.get('vehicle') or booking.get('vehicleId'),
-        'renterId': booking.get('renter') or booking.get('renterId'),
-        'startDate': booking.get('startDate') or booking.get('start_date'),
-        'endDate': booking.get('endDate') or booking.get('end_date'),
-        'amount': float(booking.get('amount', 0.0)),
+        "id": v.id,
+        "name": v.name or v.model or "",
+        "brand": v.brand or "",
+        "model": v.model or "",
+        "year": v.year,
+        "pricePerDay": float(v.pricePerDay or 0.0),
+        "price": float(v.pricePerDay or 0.0),
+        "available": bool(v.available),
+        "status": "available" if v.available else "rented",
+        "image": v.image or "",
+        "type": v.type or "",
+        "transmission": v.transmission or "",
+        "fuel": v.fuel or "",
+        "seats": v.seats,
+        "location": v.location or "",
+        "description": v.description or "",
+        "ownerId": v.ownerId,
+        "ownerEmail": v.ownerEmail or "",
     }
 
-
-def sanitize_logreport(report: Dict[str, Any]) -> Dict[str, Any]:
-    result = {
-        **report,
-        'id': report['id'],
-        'amount': float(report.get('amount', 0.0)),
-        'issues': report.get('issues', []),
-        'photos': report.get('photos', []),
-        'customLabels': report.get('customLabels', {}),
-        'comments': report.get('comments', []),
+def sanitize_booking(b: Booking) -> Dict[str, Any]:
+    return {
+        "id": b.id,
+        "vehicle": b.vehicle,
+        "vehicleId": b.vehicle,
+        "renter": b.renter,
+        "renterId": b.renter,
+        "startDate": b.startDate,
+        "endDate": b.endDate,
+        "amount": float(b.amount or 0.0),
+        "status": b.status or "pending",
     }
-    return result
 
+def sanitize_logreport(r: LogReport) -> Dict[str, Any]:
+    return {
+        "id": r.id,
+        "type": r.type,
+        "vehicleId": r.vehicleId,
+        "vehicleName": r.vehicleName or "",
+        "rentalId": r.rentalId,
+        "renterName": r.renterName or "",
+        "startDate": r.startDate,
+        "endDate": r.endDate,
+        "amount": float(r.amount or 0.0),
+        "issues": r.issues or [],
+        "notes": r.notes or "",
+        "odometer": r.odometer or "",
+        "fuelLevel": r.fuelLevel or "",
+        "photos": r.photos or [],
+        "customLabels": r.customLabels or {},
+        "checkout": r.checkout,
+        "comments": r.comments or [],
+        "createdAt": r.createdAt,
+    }
 
-def get_current_user(request: Request) -> Dict[str, Any]:
-    session_user = request.cookies.get('session_user_id')
-    if not session_user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Authentication required')
-    user = next((u for u in DB['users'] if str(u['id']) == session_user and u.get('active', True)), None)
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    session_user_id = request.cookies.get("session_user_id")
+    if not session_user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    user = db.query(User).filter(User.id == int(session_user_id), User.active == True).first()
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid session')
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
     return user
 
-
-def get_admin_user(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    if user.get('role') != 'admin':
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Admin privileges required')
+def get_admin_user(user: User = Depends(get_current_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
     return user
 
+def get_owner_user(user: User = Depends(get_current_user)) -> User:
+    """Allows both owners and admins to manage vehicles."""
+    if user.role not in ("owner", "admin"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner privileges required")
+    return user
 
-@app.on_event('startup')
-async def startup_data():
-    admin_user = {
-        'id': 1,
-        'email': 'admin@example.com',
-        'username': 'admin@example.com',
-        'password': 'secret123',
-        'firstName': 'Admin',
-        'lastName': 'User',
-        'middleName': '',
-        'sex': 'other',
-        'dateOfBirth': None,
-        'role': 'admin',
-        'active': True,
-    }
-    if not DB['users']:
-        DB['users'].append(admin_user)
+# ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
+
+@app.post("/api/login/")
+async def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
+    user = db.query(User).filter(
+        ((User.username == payload.username) | (User.email == payload.username)),
+        User.active == True
+    ).first()
+    if not user or user.password != payload.password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    response.set_cookie("session_user_id", str(user.id), httponly=True, samesite="lax")
+    return {"user": sanitize_user(user)}
 
 
-@app.post('/api/login/')
-async def login(payload: LoginRequest, response: Response):
-    user = next(
-        (
-            u
-            for u in DB['users']
-            if u.get('username') == payload.username or u.get('email') == payload.username
-        ),
-        None,
+@app.post("/api/logout/")
+async def logout(response: Response):
+    response.delete_cookie("session_user_id")
+    return {"success": True}
+
+
+@app.post("/api/register/")
+async def register(payload: RegisterRequest, response: Response, db: Session = Depends(get_db)):
+    # Validate role
+    if payload.role not in ("renter", "owner", "admin"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role. Must be renter, owner, or admin.")
+    existing = db.query(User).filter(
+        (User.email == payload.email) | (User.username == payload.username)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email or username already exists")
+    user = User(
+        email=payload.email,
+        username=payload.username,
+        password=payload.password,
+        firstName=payload.firstName or "",
+        lastName=payload.lastName or "",
+        middleName=payload.middleName or "",
+        sex=payload.sex or "",
+        dateOfBirth=payload.dateOfBirth,
+        role=payload.role or "renter",
+        active=True,
     )
-    if not user or user.get('password') != payload.password or not user.get('active', True):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid username or password')
-    response.set_cookie('session_user_id', str(user['id']), httponly=True, samesite='lax')
-    return {'user': sanitize_user(user)}
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    response.set_cookie("session_user_id", str(user.id), httponly=True, samesite="lax")
+    result = sanitize_user(user)
+    await manager.broadcast({"type": "user_created", "action": "created", "id": user.id, "payload": result})
+    return {"user": result}
+
+# ---------------------------------------------------------------------------
+# User routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/me/")
+async def get_me(current_user: User = Depends(get_current_user)):
+    return sanitize_user(current_user)
 
 
-@app.post('/api/register/')
-async def register(payload: RegisterRequest, response: Response):
-    if any(u for u in DB['users'] if u['email'] == payload.email or u['username'] == payload.username):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Email or username already exists')
-    user = {
-        'id': next_id('user'),
-        'email': payload.email,
-        'username': payload.username,
-        'password': payload.password,
-        'firstName': payload.firstName or '',
-        'lastName': payload.lastName or '',
-        'middleName': payload.middleName or '',
-        'sex': payload.sex or '',
-        'dateOfBirth': payload.dateOfBirth,
-        'role': payload.role or 'renter',
-        'active': True,
-    }
-    DB['users'].append(user)
-    response.set_cookie('session_user_id', str(user['id']), httponly=True, samesite='lax')
-    await manager.broadcast({'type': 'user_created', 'action': 'created', 'id': user['id'], 'payload': sanitize_user(user)})
-    return {'user': sanitize_user(user)}
-
-
-@app.patch('/api/me/')
-async def update_me(payload: UserUpdate, request: Request):
-    user = get_current_user(request)
+@app.patch("/api/me/")
+async def update_me(payload: UserUpdate, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
     if payload.firstName is not None:
-        user['firstName'] = payload.firstName
+        user.firstName = payload.firstName
     if payload.lastName is not None:
-        user['lastName'] = payload.lastName
+        user.lastName = payload.lastName
     if payload.middleName is not None:
-        user['middleName'] = payload.middleName
+        user.middleName = payload.middleName
     if payload.sex is not None:
-        user['sex'] = payload.sex
+        user.sex = payload.sex
     if payload.dateOfBirth is not None:
-        user['dateOfBirth'] = payload.dateOfBirth
-    await manager.broadcast({'type': 'profile_updated', 'action': 'updated', 'id': user['id'], 'payload': sanitize_user(user)})
-    return sanitize_user(user)
+        user.dateOfBirth = payload.dateOfBirth
+    db.commit()
+    db.refresh(user)
+    result = sanitize_user(user)
+    await manager.broadcast({"type": "profile_updated", "action": "updated", "id": user.id, "payload": result})
+    return result
 
 
-@app.get('/api/users/')
-async def list_users(admin: Dict[str, Any] = Depends(get_admin_user)):
-    return [sanitize_user(u) for u in DB['users'] if u.get('active', True)]
+@app.get("/api/users/")
+async def list_users(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    users = db.query(User).filter(User.active == True).all()
+    return [sanitize_user(u) for u in users]
 
 
-@app.patch('/api/users/{user_id}/')
-async def patch_user(user_id: int, payload: UserUpdate, admin: Dict[str, Any] = Depends(get_admin_user)):
-    user = next((u for u in DB['users'] if u['id'] == user_id), None)
+@app.patch("/api/users/{user_id}/")
+async def patch_user(user_id: int, payload: UserUpdate, admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if payload.firstName is not None:
-        user['firstName'] = payload.firstName
+        user.firstName = payload.firstName
     if payload.lastName is not None:
-        user['lastName'] = payload.lastName
+        user.lastName = payload.lastName
     if payload.middleName is not None:
-        user['middleName'] = payload.middleName
+        user.middleName = payload.middleName
     if payload.sex is not None:
-        user['sex'] = payload.sex
+        user.sex = payload.sex
     if payload.dateOfBirth is not None:
-        user['dateOfBirth'] = payload.dateOfBirth
+        user.dateOfBirth = payload.dateOfBirth
     if payload.active is not None:
-        user['active'] = payload.active
-    await manager.broadcast({'type': 'user_updated', 'action': 'updated', 'id': user_id, 'payload': sanitize_user(user)})
-    return sanitize_user(user)
-
-
-@app.delete('/api/users/{user_id}/')
-async def delete_user(user_id: int, admin: Dict[str, Any] = Depends(get_admin_user)):
-    index = next((i for i, u in enumerate(DB['users']) if u['id'] == user_id), None)
-    if index is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
-    user = DB['users'].pop(index)
-    await manager.broadcast({'type': 'user_deleted', 'action': 'deleted', 'id': user_id, 'payload': sanitize_user(user)})
-    return {'success': True}
-
-
-@app.get('/api/cars/')
-async def list_cars():
-    return [sanitize_vehicle(v) for v in DB['vehicles']]
-
-
-@app.post('/api/cars/')
-async def create_car(payload: CarPayload, current_user: Dict[str, Any] = Depends(get_current_user)):
-    vehicle = {
-        'id': next_id('vehicle'),
-        'name': payload.model or payload.brand,
-        'brand': payload.brand or '',
-        'model': payload.model or payload.name if hasattr(payload, 'name') else payload.model or '',
-        'year': payload.year or datetime.now().year,
-        'pricePerDay': float(payload.pricePerDay or 0.0),
-        'available': payload.available if payload.available is not None else True,
-        'image': payload.image or '',
-        'type': payload.type or '',
-        'transmission': payload.transmission or '',
-        'fuel': payload.fuel or '',
-        'seats': payload.seats,
-        'location': payload.location or '',
-        'description': payload.description or '',
-        'ownerId': payload.ownerId or current_user['id'],
-        'ownerEmail': payload.ownerEmail or current_user['email'],
-    }
-    DB['vehicles'].append(vehicle)
-    result = sanitize_vehicle(vehicle)
-    await manager.broadcast({'type': 'vehicle_created', 'action': 'created', 'id': result['id'], 'payload': result})
+        user.active = payload.active
+    db.commit()
+    db.refresh(user)
+    result = sanitize_user(user)
+    await manager.broadcast({"type": "user_updated", "action": "updated", "id": user_id, "payload": result})
     return result
 
 
-@app.patch('/api/cars/{vehicle_id}/')
-async def update_car(vehicle_id: int, payload: CarPayload, current_user: Dict[str, Any] = Depends(get_current_user)):
-    vehicle = next((v for v in DB['vehicles'] if v['id'] == vehicle_id), None)
+@app.delete("/api/users/{user_id}/")
+async def delete_user(user_id: int, admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    result = sanitize_user(user)
+    db.delete(user)
+    db.commit()
+    await manager.broadcast({"type": "user_deleted", "action": "deleted", "id": user_id, "payload": result})
+    return {"success": True}
+
+# ---------------------------------------------------------------------------
+# Vehicle (car) routes — owner or admin only for write operations
+# ---------------------------------------------------------------------------
+
+@app.get("/api/cars/")
+async def list_cars(db: Session = Depends(get_db)):
+    vehicles = db.query(Vehicle).all()
+    return [sanitize_vehicle(v) for v in vehicles]
+
+
+@app.post("/api/cars/")
+async def create_car(payload: CarPayload, current_user: User = Depends(get_owner_user), db: Session = Depends(get_db)):
+    vehicle = Vehicle(
+        name=payload.model or payload.brand or "",
+        brand=payload.brand or "",
+        model=payload.model or "",
+        year=payload.year or datetime.now().year,
+        pricePerDay=float(payload.pricePerDay or 0.0),
+        available=payload.available if payload.available is not None else True,
+        image=payload.image or "",
+        type=payload.type or "",
+        transmission=payload.transmission or "",
+        fuel=payload.fuel or "",
+        seats=payload.seats,
+        location=payload.location or "",
+        description=payload.description or "",
+        ownerId=payload.ownerId or current_user.id,
+        ownerEmail=payload.ownerEmail or current_user.email,
+    )
+    db.add(vehicle)
+    db.commit()
+    db.refresh(vehicle)
+    result = sanitize_vehicle(vehicle)
+    await manager.broadcast({"type": "vehicle_created", "action": "created", "id": vehicle.id, "payload": result})
+    return result
+
+
+@app.patch("/api/cars/{vehicle_id}/")
+async def update_car(vehicle_id: int, payload: CarPayload, current_user: User = Depends(get_owner_user), db: Session = Depends(get_db)):
+    vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
     if not vehicle:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Vehicle not found')
-    for field in payload.dict(exclude_unset=True):
-        vehicle[field] = payload.dict(exclude_unset=True)[field]
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    # Owners can only edit their own vehicles; admins can edit any
+    if current_user.role == "owner" and vehicle.ownerId != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only edit your own vehicles")
+    for field, value in payload.dict(exclude_unset=True).items():
+        setattr(vehicle, field, value)
+    db.commit()
+    db.refresh(vehicle)
     result = sanitize_vehicle(vehicle)
-    await manager.broadcast({'type': 'vehicle_updated', 'action': 'updated', 'id': vehicle_id, 'payload': result})
+    await manager.broadcast({"type": "vehicle_updated", "action": "updated", "id": vehicle_id, "payload": result})
     return result
 
 
-@app.delete('/api/cars/{vehicle_id}/')
-async def delete_car(vehicle_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
-    index = next((i for i, v in enumerate(DB['vehicles']) if v['id'] == vehicle_id), None)
-    if index is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Vehicle not found')
-    vehicle = DB['vehicles'].pop(index)
-    await manager.broadcast({'type': 'vehicle_deleted', 'action': 'deleted', 'id': vehicle_id, 'payload': sanitize_vehicle(vehicle)})
-    return {'success': True}
+@app.delete("/api/cars/{vehicle_id}/")
+async def delete_car(vehicle_id: int, current_user: User = Depends(get_owner_user), db: Session = Depends(get_db)):
+    vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+    if not vehicle:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    # Owners can only delete their own vehicles; admins can delete any
+    if current_user.role == "owner" and vehicle.ownerId != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own vehicles")
+    result = sanitize_vehicle(vehicle)
+    db.delete(vehicle)
+    db.commit()
+    await manager.broadcast({"type": "vehicle_deleted", "action": "deleted", "id": vehicle_id, "payload": result})
+    return {"success": True}
+
+# ---------------------------------------------------------------------------
+# Booking routes — renters and admins
+# ---------------------------------------------------------------------------
+
+@app.get("/api/bookings/")
+async def list_bookings(db: Session = Depends(get_db)):
+    bookings = db.query(Booking).all()
+    return [sanitize_booking(b) for b in bookings]
 
 
-@app.get('/api/bookings/')
-async def list_bookings():
-    return [sanitize_booking(b) for b in DB['bookings']]
-
-
-@app.post('/api/bookings/')
-async def create_booking(payload: BookingPayload, current_user: Dict[str, Any] = Depends(get_current_user)):
-    booking = {
-        'id': next_id('booking'),
-        'vehicle': payload.vehicle,
-        'renter': payload.renter,
-        'startDate': payload.startDate or datetime.now().isoformat(),
-        'endDate': payload.endDate,
-        'amount': float(payload.amount or 0.0),
-        'status': payload.status or 'pending',
-    }
-    DB['bookings'].append(booking)
+@app.post("/api/bookings/")
+async def create_booking(payload: BookingPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Only renters and admins can create bookings
+    if current_user.role == "owner":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owners cannot make bookings")
+    booking = Booking(
+        vehicle=payload.vehicle,
+        renter=payload.renter,
+        startDate=payload.startDate or datetime.now().isoformat(),
+        endDate=payload.endDate,
+        amount=float(payload.amount or 0.0),
+        status=payload.status or "pending",
+    )
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
     result = sanitize_booking(booking)
-    await manager.broadcast({'type': 'booking_created', 'action': 'created', 'id': result['id'], 'payload': result})
+    await manager.broadcast({"type": "booking_created", "action": "created", "id": booking.id, "payload": result})
     return result
 
 
-@app.patch('/api/bookings/{booking_id}/')
-async def update_booking(booking_id: int, payload: BookingUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
-    booking = next((b for b in DB['bookings'] if b['id'] == booking_id), None)
+@app.patch("/api/bookings/{booking_id}/")
+async def update_booking(booking_id: int, payload: BookingUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
     if not booking:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Booking not found')
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
     if payload.vehicle is not None:
-        booking['vehicle'] = payload.vehicle
+        booking.vehicle = payload.vehicle
     if payload.renter is not None:
-        booking['renter'] = payload.renter
+        booking.renter = payload.renter
     if payload.startDate is not None:
-        booking['startDate'] = payload.startDate
+        booking.startDate = payload.startDate
     if payload.endDate is not None:
-        booking['endDate'] = payload.endDate
+        booking.endDate = payload.endDate
     if payload.amount is not None:
-        booking['amount'] = float(payload.amount)
+        booking.amount = float(payload.amount)
     if payload.status is not None:
-        booking['status'] = payload.status
+        booking.status = payload.status
+    db.commit()
+    db.refresh(booking)
     result = sanitize_booking(booking)
-    await manager.broadcast({'type': 'booking_updated', 'action': 'updated', 'id': booking_id, 'payload': result})
+    await manager.broadcast({"type": "booking_updated", "action": "updated", "id": booking_id, "payload": result})
     return result
 
 
-@app.delete('/api/bookings/{booking_id}/')
-async def delete_booking(booking_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
-    index = next((i for i, b in enumerate(DB['bookings']) if b['id'] == booking_id), None)
-    if index is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Booking not found')
-    booking = DB['bookings'].pop(index)
-    await manager.broadcast({'type': 'booking_deleted', 'action': 'deleted', 'id': booking_id, 'payload': sanitize_booking(booking)})
-    return {'success': True}
+@app.delete("/api/bookings/clear_user_bookings/")
+async def clear_user_bookings(payload: ClearBookingsRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role != "admin" and current_user.id != payload.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to clear these bookings")
+    bookings_to_delete = db.query(Booking).filter(Booking.renter == payload.user_id).all()
+    for booking in bookings_to_delete:
+        result = sanitize_booking(booking)
+        db.delete(booking)
+        await manager.broadcast({"type": "booking_deleted", "action": "deleted", "id": booking.id, "payload": result})
+    db.commit()
+    return {"success": True}
 
 
-@app.delete('/api/bookings/clear_user_bookings/')
-async def clear_user_bookings(payload: ClearBookingsRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
-    if current_user['role'] != 'admin' and current_user['id'] != payload.user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Not allowed to clear these bookings')
-    remaining = [b for b in DB['bookings'] if b.get('renter') != payload.user_id]
-    deleted = [b for b in DB['bookings'] if b.get('renter') == payload.user_id]
-    DB['bookings'][:] = remaining
-    for booking in deleted:
-        await manager.broadcast({'type': 'booking_deleted', 'action': 'deleted', 'id': booking['id'], 'payload': sanitize_booking(booking)})
-    return {'success': True}
+@app.delete("/api/bookings/{booking_id}/")
+async def delete_booking(booking_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+    result = sanitize_booking(booking)
+    db.delete(booking)
+    db.commit()
+    await manager.broadcast({"type": "booking_deleted", "action": "deleted", "id": booking_id, "payload": result})
+    return {"success": True}
+
+# ---------------------------------------------------------------------------
+# Log report routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/logreports/")
+async def list_logreports(db: Session = Depends(get_db)):
+    reports = db.query(LogReport).all()
+    return [sanitize_logreport(r) for r in reports]
 
 
-@app.get('/api/logreports/')
-async def list_logreports():
-    return [sanitize_logreport(r) for r in DB['logreports']]
-
-
-@app.post('/api/logreports/')
-async def create_logreport(payload: LogReportPayload, current_user: Dict[str, Any] = Depends(get_current_user)):
-    report = {
-        'id': next_id('logreport'),
-        'type': payload.type,
-        'vehicleId': payload.vehicleId,
-        'vehicleName': payload.vehicleName,
-        'rentalId': payload.rentalId,
-        'renterName': payload.renterName,
-        'startDate': payload.startDate or datetime.now().isoformat(),
-        'endDate': payload.endDate,
-        'amount': float(payload.amount or 0.0),
-        'issues': payload.issues or [],
-        'notes': payload.notes or '',
-        'odometer': payload.odometer or '',
-        'fuelLevel': payload.fuelLevel or '',
-        'photos': payload.photos or [],
-        'customLabels': payload.customLabels or {},
-        'checkout': payload.checkout,
-        'comments': payload.comments or [],
-        'createdAt': datetime.now().isoformat(),
-    }
-    DB['logreports'].append(report)
+@app.post("/api/logreports/")
+async def create_logreport(payload: LogReportPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    report = LogReport(
+        type=payload.type,
+        vehicleId=payload.vehicleId,
+        vehicleName=payload.vehicleName or "",
+        rentalId=payload.rentalId,
+        renterName=payload.renterName or "",
+        startDate=payload.startDate or datetime.now().isoformat(),
+        endDate=payload.endDate,
+        amount=float(payload.amount or 0.0),
+        issues=payload.issues or [],
+        notes=payload.notes or "",
+        odometer=payload.odometer or "",
+        fuelLevel=payload.fuelLevel or "",
+        photos=payload.photos or [],
+        customLabels=payload.customLabels or {},
+        checkout=payload.checkout,
+        comments=payload.comments or [],
+        createdAt=datetime.now().isoformat(),
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
     result = sanitize_logreport(report)
-    await manager.broadcast({'type': 'logreport_created', 'action': 'created', 'id': result['id'], 'payload': result})
+    await manager.broadcast({"type": "logreport_created", "action": "created", "id": report.id, "payload": result})
     return result
 
 
-@app.patch('/api/logreports/{report_id}/')
-async def update_logreport(report_id: int, payload: LogReportUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
-    report = next((r for r in DB['logreports'] if r['id'] == report_id), None)
+@app.patch("/api/logreports/{report_id}/")
+async def update_logreport(report_id: int, payload: LogReportUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    report = db.query(LogReport).filter(LogReport.id == report_id).first()
     if not report:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Log report not found')
-    update_data = payload.dict(exclude_unset=True)
-    report.update(update_data)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Log report not found")
+    for field, value in payload.dict(exclude_unset=True).items():
+        setattr(report, field, value)
+    db.commit()
+    db.refresh(report)
     result = sanitize_logreport(report)
-    await manager.broadcast({'type': 'logreport_updated', 'action': 'updated', 'id': report_id, 'payload': result})
+    await manager.broadcast({"type": "logreport_updated", "action": "updated", "id": report_id, "payload": result})
     return result
 
 
-@app.post('/api/logreports/{report_id}/checkout/')
-async def checkout_logreport(report_id: int, payload: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
-    report = next((r for r in DB['logreports'] if r['id'] == report_id), None)
+@app.post("/api/logreports/{report_id}/checkout/")
+async def checkout_logreport(report_id: int, payload: Dict[str, Any], current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    report = db.query(LogReport).filter(LogReport.id == report_id).first()
     if not report:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Log report not found')
-    report['checkout'] = payload
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Log report not found")
+    report.checkout = payload
+    db.commit()
+    db.refresh(report)
     result = sanitize_logreport(report)
-    await manager.broadcast({'type': 'logreport_updated', 'action': 'checkout', 'id': report_id, 'payload': result})
+    await manager.broadcast({"type": "logreport_updated", "action": "checkout", "id": report_id, "payload": result})
     return result
 
 
-@app.post('/api/logreports/{report_id}/comments/')
-async def add_comment(report_id: int, payload: CommentPayload, current_user: Dict[str, Any] = Depends(get_current_user)):
-    report = next((r for r in DB['logreports'] if r['id'] == report_id), None)
+@app.post("/api/logreports/{report_id}/comments/")
+async def add_comment(report_id: int, payload: CommentPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    report = db.query(LogReport).filter(LogReport.id == report_id).first()
     if not report:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Log report not found')
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Log report not found")
     comment = payload.dict()
-    comment['createdAt'] = comment.get('createdAt') or datetime.now().isoformat()
-    report.setdefault('comments', []).append(comment)
+    comment["createdAt"] = comment.get("createdAt") or datetime.now().isoformat()
+    comments = list(report.comments or [])
+    comments.append(comment)
+    report.comments = comments
+    db.commit()
+    db.refresh(report)
     result = sanitize_logreport(report)
-    await manager.broadcast({'type': 'logreport_updated', 'action': 'comment_added', 'id': report_id, 'payload': result})
+    await manager.broadcast({"type": "logreport_updated", "action": "comment_added", "id": report_id, "payload": result})
     return result
 
 
-@app.delete('/api/logreports/{report_id}/')
-async def delete_logreport(report_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
-    index = next((i for i, r in enumerate(DB['logreports']) if r['id'] == report_id), None)
-    if index is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Log report not found')
-    report = DB['logreports'].pop(index)
-    await manager.broadcast({'type': 'logreport_deleted', 'action': 'deleted', 'id': report_id, 'payload': sanitize_logreport(report)})
-    return {'success': True}
+@app.delete("/api/logreports/{report_id}/")
+async def delete_logreport(report_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    report = db.query(LogReport).filter(LogReport.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Log report not found")
+    result = sanitize_logreport(report)
+    db.delete(report)
+    db.commit()
+    await manager.broadcast({"type": "logreport_deleted", "action": "deleted", "id": report_id, "payload": result})
+    return {"success": True}
 
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
 
-@app.websocket('/ws/sync/')
+@app.websocket("/ws/sync/")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
             await websocket.receive_text()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
         manager.disconnect(websocket)
-    except Exception:
-        manager.disconnect(websocket)
+        
