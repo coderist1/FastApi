@@ -661,6 +661,39 @@ async def delete_logreport(report_id: int, current_user: User = Depends(get_curr
     return {"success": True}
 
 # ---------------------------------------------------------------------------
+# Sentiment analysis (Hugging Face)
+# ---------------------------------------------------------------------------
+
+
+class SentimentRequest(BaseModel):
+    text: str
+
+
+_sentiment_pipe = None
+
+def get_sentiment_pipeline():
+    global _sentiment_pipe
+    if _sentiment_pipe is None:
+        from transformers import pipeline
+        _sentiment_pipe = pipeline(
+            "sentiment-analysis",
+            model="distilbert-base-uncased-finetuned-sst-2-english",
+        )
+    return _sentiment_pipe
+
+
+@app.post("/api/sentiment/")
+async def sentiment(payload: SentimentRequest):
+    pipe = get_sentiment_pipeline()
+    try:
+        # limit text length to reasonable size
+        text = (payload.text or "")[:10000]
+        result = pipe(text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"result": result}
+
+
 # WebSocket
 # ---------------------------------------------------------------------------
 

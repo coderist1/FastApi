@@ -29,8 +29,43 @@ This backend implements a FastAPI API compatible with the attached `Car-Rental-`
 
 ## Run locally
 
+1. Create a virtual environment
+
+Windows
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+Mac / Linux
+
+```bash
+python -m venv venv
+source venv/bin/activate
+```
+
+2. Install dependencies
+
 ```bash
 python -m pip install -r requirements.txt
+```
+
+Optionally save them:
+
+```bash
+pip freeze > requirements.txt
+```
+
+3. Model used
+
+This project includes a small sentiment-analysis endpoint that uses the Hugging Face model:
+
+distilbert-base-uncased-finetuned-sst-2-english
+
+4. Run the app
+
+```bash
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
