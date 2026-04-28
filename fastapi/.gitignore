@@ -206,5 +206,8 @@ pip-selfcheck.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,venv,visualstudiocode
 
-# Hugging Face cache
+# Hugging Face model cache
 .cache/
+huggingface/
+*.bin
+*.safetensors
