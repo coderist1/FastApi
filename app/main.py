@@ -8,6 +8,3 @@ app = FastAPI()
 def home():
 	return {"message": "API is running"}
 
-@app.post("/predict", response_model=OutputData)
-def predict(data: InputData):
-	return model_instance.predict(data.text)
