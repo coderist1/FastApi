@@ -1,6 +1,6 @@
 # FastAPI Backend for Car Rental Frontend
 
-This backend implements a FastAPI API compatible with the attached `Car-Rental-` React frontend.
+This backend implements the FastAPI API used by the attached CarRentalMobile app.
 
 ## Available endpoints
 
@@ -72,6 +72,7 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ## Notes
 
 - Authentication is managed using a simple session cookie named `session_user_id`.
+- The mobile client sends requests with credentials enabled so the session cookie is reused after login.
 - A default admin user is created automatically:
   - `email`: `admin@example.com`
   - `password`: `secret123`
