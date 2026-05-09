@@ -27,7 +27,7 @@ def home():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": "lightgbm", "demand_model": "lightgbm-regressor"}
+    return {"status": "ok", "model": "lightgbm", "demand_model": "prophet-forecaster"}
 
 # === Existing Single Booking Prediction ===
 @app.post("/predict", response_model=PredictionOutput)

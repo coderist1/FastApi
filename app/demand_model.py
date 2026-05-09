@@ -8,12 +8,17 @@ import joblib
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMRegressor
+try:
+    from prophet import Prophet
+except Exception:  # pragma: no cover - optional dependency
+    Prophet = None
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
 DEFAULT_ARTIFACT_PATH = Path(__file__).resolve().parents[1] / "model" / "demand_lightgbm.pkl"
 DEFAULT_HISTORY_PATH = Path(__file__).resolve().parents[1] / "data" / "historical_bookings.csv"
+DEFAULT_PROPHET_ARTIFACT_PATH = Path(__file__).resolve().parents[1] / "model" / "demand_prophet.pkl"
 
 SEGMENT_COLUMNS = ["from_area_id", "vehicle_model_id", "travel_type_id"]
 LAG_FEATURES = [1, 7, 14, 28]
@@ -240,8 +245,58 @@ def train_demand_model(data_path: Path, artifact_path: Path) -> dict[str, float 
     return metrics
 
 
+def train_prophet_model(data_path: Path, artifact_path: Path) -> dict[str, float | str]:
+    if Prophet is None:
+        raise RuntimeError("`prophet` package is not installed. Please install it and try again.")
+
+    raw = _load_history_frame(str(data_path))
+    if raw.empty:
+        raise ValueError("Historical booking data is empty.")
+
+    # Aggregate daily counts
+    ts = raw.groupby("booking_date").size().reset_index(name="y")
+    ts = ts.sort_values("booking_date").rename(columns={"booking_date": "ds"})
+
+    # Split train/test by date (80/20)
+    unique_dates = pd.Index(ts["ds"].sort_values().unique())
+    if len(unique_dates) < 10:
+        raise ValueError("Not enough distinct booking dates to train Prophet model.")
+
+    split_index = max(1, int(len(unique_dates) * 0.8))
+    split_date = unique_dates[split_index - 1]
+    train_df = ts[ts["ds"] <= split_date].copy()
+    test_df = ts[ts["ds"] > split_date].copy()
+
+    model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+    model.fit(train_df)
+
+    forecast = model.predict(test_df[["ds"]])
+    y_true = test_df["y"].values
+    y_pred = np.clip(forecast["yhat"].values, 0, None)
+
+    metrics = {
+        "mae": float(mean_absolute_error(y_true, y_pred)),
+        "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        "rows": int(len(ts)),
+        "training_days": int(train_df["ds"].nunique()),
+        "testing_days": int(test_df["ds"].nunique()),
+    }
+
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {
+            "model": model,
+            "model_name": "prophet_demand_forecaster",
+            "history_path": str(data_path),
+            "metrics": metrics,
+        },
+        artifact_path,
+    )
+    return metrics
+
+
 class DemandForecaster:
-    def __init__(self, artifact_path: Path | str = DEFAULT_ARTIFACT_PATH, history_path: Path | str = DEFAULT_HISTORY_PATH):
+    def __init__(self, artifact_path: Path | str = DEFAULT_PROPHET_ARTIFACT_PATH, history_path: Path | str = DEFAULT_HISTORY_PATH):
         self.artifact_path = Path(artifact_path)
         self.history_path = Path(history_path)
         self.reload()
@@ -249,78 +304,16 @@ class DemandForecaster:
     def reload(self):
         if not self.artifact_path.exists():
             raise FileNotFoundError(
-                f"Demand model not found at {self.artifact_path}. Run `python -m app.train_demand --data <csv>` first."
+                f"Demand model not found at {self.artifact_path}. Run `python -m app.train_demand --data <csv> --method prophet` first."
             )
 
         payload = joblib.load(self.artifact_path)
-        if not isinstance(payload, dict) or "model" not in payload or "feature_columns" not in payload:
-            raise ValueError("Unexpected demand model artifact format. Retrain with `python -m app.train_demand`. ")
+        if not isinstance(payload, dict) or "model" not in payload:
+            raise ValueError("Unexpected demand model artifact format. Retrain with `python -m app.train_demand --method prophet`.")
 
         self.model = payload["model"]
-        self.feature_columns = payload["feature_columns"]
-        self.maps = payload.get("maps", {})
-        self.model_name = payload.get("model_name", "lightgbm_demand_regressor")
-        self.segment_columns = payload.get("segment_columns", SEGMENT_COLUMNS)
+        self.model_name = payload.get("model_name", "prophet_demand_forecaster")
         self.history_path = Path(payload.get("history_path", self.history_path))
-
-    def _segment_history_lookup(self, from_area_id: int, vehicle_model_id: int, travel_type_id: int) -> dict[pd.Timestamp, int]:
-        history = _load_history_frame(str(self.history_path))
-        segment = history[
-            (history["from_area_id"] == int(from_area_id))
-            & (history["vehicle_model_id"] == int(vehicle_model_id))
-            & (history["travel_type_id"] == int(travel_type_id))
-        ]
-
-        if segment.empty:
-            return {}
-
-        counts = segment.groupby("booking_date").size()
-        full_range = pd.date_range(history["booking_date"].min(), history["booking_date"].max(), freq="D")
-        counts = counts.reindex(full_range, fill_value=0)
-        counts.index = counts.index.normalize()
-        return {pd.Timestamp(index): int(value) for index, value in counts.items()}
-
-    def _build_row(
-        self,
-        current_day: date,
-        from_area_id: int,
-        vehicle_model_id: int,
-        travel_type_id: int,
-        history_lookup: dict[pd.Timestamp, int],
-    ) -> dict[str, float | int]:
-        current_timestamp = pd.Timestamp(current_day).normalize()
-
-        def lookup(offset: int) -> float:
-            value = history_lookup.get(current_timestamp - timedelta(days=offset))
-            return float(value) if value is not None else np.nan
-
-        window_values: dict[int, float] = {}
-        for window in ROLLING_WINDOWS:
-            values = [lookup(offset) for offset in range(1, window + 1)]
-            valid_values = [value for value in values if not pd.isna(value)]
-            window_values[window] = float(np.mean(valid_values)) if valid_values else np.nan
-
-        row = {
-            "from_area_id": int(from_area_id),
-            "vehicle_model_id": int(vehicle_model_id),
-            "travel_type_id": int(travel_type_id),
-            "booking_date": current_timestamp,
-            "lag_1": lookup(1),
-            "lag_7": lookup(7),
-            "lag_14": lookup(14),
-            "lag_28": lookup(28),
-            "rolling_mean_7": window_values[7],
-            "rolling_mean_14": window_values[14],
-            "rolling_mean_28": window_values[28],
-            "rolling_std_7": float(np.std([value for value in [lookup(offset) for offset in range(1, 8)] if not pd.isna(value)]))
-            if any(not pd.isna(lookup(offset)) for offset in range(1, 8))
-            else np.nan,
-        }
-
-        row = _calendar_features(pd.DataFrame([row]))
-        row = _holiday_flags(row)
-        row = _add_static_features(row, self.maps)
-        return row.iloc[0].to_dict()
 
     def predict_demand(
         self,
@@ -333,33 +326,29 @@ class DemandForecaster:
         if end_date < start_date:
             raise ValueError("end_date must be greater than or equal to start_date")
 
-        travel_type = 0 if travel_type_id is None else int(travel_type_id)
-        history_lookup = self._segment_history_lookup(from_area_id, vehicle_model_id, travel_type)
+        dates = pd.date_range(start=start_date, end=end_date, freq="D")
+        future_df = pd.DataFrame({"ds": dates})
+        forecast = self.model.predict(future_df)
+
         predictions = []
         total_predicted_bookings = 0
 
-        day = start_date
-        while day <= end_date:
-            row = self._build_row(day, from_area_id, vehicle_model_id, travel_type, history_lookup)
-            feature_frame = pd.DataFrame([{column: row.get(column, np.nan) for column in self.feature_columns}])
-            predicted_value = float(self.model.predict(feature_frame)[0])
-            predicted_bookings = max(0, int(round(predicted_value)))
-
-            history_lookup[pd.Timestamp(day).normalize()] = predicted_bookings
+        for _, row in forecast.iterrows():
+            day = row["ds"].date()
+            predicted_bookings = max(0, int(round(row["yhat"])))
             predictions.append({"date": day.isoformat(), "predicted_bookings": predicted_bookings})
             total_predicted_bookings += predicted_bookings
-            day += timedelta(days=1)
 
         return {
             "predictions": predictions,
             "total_predicted_bookings": total_predicted_bookings,
             "number_of_days": len(predictions),
-            "message": "Demand forecast generated successfully",
+            "message": "Demand forecast generated successfully using Prophet",
         }
 
 
 class LazyDemandForecaster:
-    def __init__(self, artifact_path: Path | str = DEFAULT_ARTIFACT_PATH, history_path: Path | str = DEFAULT_HISTORY_PATH):
+    def __init__(self, artifact_path: Path | str = DEFAULT_PROPHET_ARTIFACT_PATH, history_path: Path | str = DEFAULT_HISTORY_PATH):
         self.artifact_path = Path(artifact_path)
         self.history_path = Path(history_path)
         self._model: DemandForecaster | None = None
