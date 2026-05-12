@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import shutil
 from app.schemas import (
@@ -31,6 +32,10 @@ from .car_storage import (
 
 app = FastAPI(title="Car Rental AI System")
 
+# Ensure uploads directory exists and mount it to serve static files (images)
+uploads_dir = Path(__file__).resolve().parents[1] / "uploads"
+uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 @app.on_event("startup")
 def startup_event():
