@@ -370,19 +370,35 @@ def register_no_prefix(user_data: dict):
 # === Reports Endpoints ===
 
 @app.get("/api/reports")
+@app.get("/api/reports/")
 def get_reports():
     """Get all user reports"""
-    return {
-        "reports": [
-            # Return user rental reports/history
-            # Example: {"id": 1, "car": "Toyota Camry", "rental_date": "2024-04-01", "total_cost": 250}
-        ]
-    }
+    reports = car_list_logreports()
+    return {"reports": reports} if isinstance(reports, list) else reports
+
+
+@app.post("/api/reports")
+@app.post("/api/reports/")
+def create_report(payload: dict):
+    """Create a new rental report (check-in) - ✅ FIXED: Added POST support"""
+    try:
+        report = car_create_logreport(payload)
+        return report
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 @app.get("/reports")
 def get_reports_no_prefix():
     """Get reports endpoint without /api prefix (for api.js variants)"""
     return get_reports()
+
+
+@app.post("/reports")
+@app.post("/reports/")
+def create_report_no_prefix(payload: dict):
+    """Create report endpoint without /api prefix"""
+    return create_report(payload)
 
 # === Reservations Endpoints ===
 
