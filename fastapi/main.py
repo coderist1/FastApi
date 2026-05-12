@@ -575,6 +575,8 @@ async def delete_booking(booking_id: int, current_user: User = Depends(get_curre
 
 @app.get("/api/logreports")
 @app.get("/api/logreports/")
+@app.get("/api/reports")
+@app.get("/api/reports/")
 async def list_logreports(db: Session = Depends(get_db)):
     reports = db.query(LogReport).all()
     return [sanitize_logreport(r) for r in reports]
@@ -582,6 +584,8 @@ async def list_logreports(db: Session = Depends(get_db)):
 
 @app.post("/api/logreports")
 @app.post("/api/logreports/")
+@app.post("/api/reports")
+@app.post("/api/reports/")
 async def create_logreport(payload: LogReportPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     report = LogReport(
         type=payload.type,
@@ -610,7 +614,10 @@ async def create_logreport(payload: LogReportPayload, current_user: User = Depen
     return result
 
 
+@app.patch("/api/logreports/{report_id}")
 @app.patch("/api/logreports/{report_id}/")
+@app.patch("/api/reports/{report_id}")
+@app.patch("/api/reports/{report_id}/")
 async def update_logreport(report_id: int, payload: LogReportUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     report = db.query(LogReport).filter(LogReport.id == report_id).first()
     if not report:
@@ -624,7 +631,10 @@ async def update_logreport(report_id: int, payload: LogReportUpdate, current_use
     return result
 
 
+@app.post("/api/logreports/{report_id}/checkout")
 @app.post("/api/logreports/{report_id}/checkout/")
+@app.post("/api/reports/{report_id}/checkout")
+@app.post("/api/reports/{report_id}/checkout/")
 async def checkout_logreport(report_id: int, payload: Dict[str, Any], current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     report = db.query(LogReport).filter(LogReport.id == report_id).first()
     if not report:
@@ -637,7 +647,10 @@ async def checkout_logreport(report_id: int, payload: Dict[str, Any], current_us
     return result
 
 
+@app.post("/api/logreports/{report_id}/comments")
 @app.post("/api/logreports/{report_id}/comments/")
+@app.post("/api/reports/{report_id}/comments")
+@app.post("/api/reports/{report_id}/comments/")
 async def add_comment(report_id: int, payload: CommentPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     report = db.query(LogReport).filter(LogReport.id == report_id).first()
     if not report:
@@ -654,7 +667,10 @@ async def add_comment(report_id: int, payload: CommentPayload, current_user: Use
     return result
 
 
+@app.delete("/api/logreports/{report_id}")
 @app.delete("/api/logreports/{report_id}/")
+@app.delete("/api/reports/{report_id}")
+@app.delete("/api/reports/{report_id}/")
 async def delete_logreport(report_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     report = db.query(LogReport).filter(LogReport.id == report_id).first()
     if not report:

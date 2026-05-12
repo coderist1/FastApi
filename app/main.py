@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from datetime import datetime
 import shutil
 from typing import List, Dict, Any
 from app.schemas import (
@@ -20,6 +21,7 @@ from .car_storage import (
     delete_booking as car_delete_booking,
     delete_vehicle as car_delete_vehicle,
     get_booking as car_get_booking,
+    get_logreport as car_get_logreport,
     get_user_by_email as car_get_user_by_email,
     get_vehicle as car_get_vehicle,
     init_db as car_init_db,
@@ -27,6 +29,7 @@ from .car_storage import (
     list_logreports as car_list_logreports,
     list_vehicles as car_list_vehicles,
     update_booking as car_update_booking,
+    update_logreport as car_update_logreport,
     update_user as car_update_user,
     update_vehicle as car_update_vehicle,
     upsert_user as car_upsert_user,
@@ -434,6 +437,70 @@ def create_reservation(reservation_data: dict):
 def create_reservation_no_prefix(reservation_data: dict):
     """Create reservation endpoint without /api prefix"""
     return create_reservation(reservation_data)
+
+# === Log Report Endpoints ===
+
+@app.patch("/api/logreports/{report_id}")
+@app.patch("/api/logreports/{report_id}/")
+def update_log_report(report_id: int, payload: dict):
+    """Update a log report"""
+    try:
+        report = car_update_logreport(report_id, payload)
+        if not report:
+            raise HTTPException(status_code=404, detail="Log report not found")
+        return report
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/logreports/{report_id}/checkout")
+@app.post("/api/logreports/{report_id}/checkout/")
+def checkout_log_report(report_id: int, payload: dict):
+    """Save checkout data for a log report"""
+    try:
+        report = car_get_logreport(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Log report not found")
+        # Merge checkout data into the report
+        updated = {**report, "checkout": payload}
+        result = car_update_logreport(report_id, updated)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/logreports/{report_id}/comments")
+@app.post("/api/logreports/{report_id}/comments/")
+def add_comment_to_report(report_id: int, payload: dict):
+    """Add a comment to a log report"""
+    try:
+        report = car_get_logreport(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Log report not found")
+        
+        comment = {
+            "author": payload.get("author", "Anonymous"),
+            "message": payload.get("message", ""),
+            "createdAt": payload.get("createdAt") or datetime.utcnow().isoformat()
+        }
+        
+        comments = list(report.get("comments", []) or [])
+        comments.append(comment)
+        
+        updated = {**report, "comments": comments}
+        result = car_update_logreport(report_id, updated)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# === User Endpoints ===
+
+@app.get("/api/users")
+@app.get("/api/users/")
+def get_users():
+    """Get all users - returns empty list for compatibility"""
+    return []
 
 # ---------------------------------------------------------------------------
 # WebSocket

@@ -548,6 +548,53 @@ def list_logreports() -> list[dict[str, Any]]:
         return [_report_row(row) for row in rows]
 
 
+def get_logreport(report_id: int) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM logreports WHERE id = ?", (report_id,)).fetchone()
+        return _report_row(row) if row else None
+
+
+def update_logreport(report_id: int, payload: dict[str, Any]) -> dict[str, Any] | None:
+    current = get_logreport(report_id)
+    if not current:
+        return None
+
+    # Handle 'checkout' logic cleanly: if checkout is provided, we can either
+    # merge it into existing or store it as stringified JSON.
+    checkout_val = _pick(payload, "checkout", default=current["checkout"])
+    if isinstance(checkout_val, dict):
+        checkout_val = json.dumps(checkout_val, ensure_ascii=True)
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            UPDATE logreports
+            SET type = ?, vehicle_id = ?, vehicle_name = ?, rental_id = ?, renter_name = ?,
+                start_date = ?, end_date = ?, amount = ?, issues = ?, notes = ?, odometer = ?,
+                fuel_level = ?, photos = ?, custom_labels = ?, checkout = ?, comments = ?
+            WHERE id = ?
+            """,
+            (
+                str(_pick(payload, "type", default=current["type"])),
+                int(_pick(payload, "vehicleId", "vehicle_id", default=current["vehicleId"]) or 0),
+                str(_pick(payload, "vehicleName", "vehicle_name", default=current["vehicleName"])),
+                int(_pick(payload, "rentalId", "rental_id", default=current["rentalId"]) or 0),
+                str(_pick(payload, "renterName", "renter_name", default=current["renterName"])),
+                str(_pick(payload, "startDate", "start_date", default=current["startDate"])),
+                str(_pick(payload, "endDate", "end_date", default=current["endDate"])),
+                float(_pick(payload, "amount", default=current["amount"]) or 0),
+                _json_dump(_pick(payload, "issues", default=current["issues"])),
+                str(_pick(payload, "notes", default=current["notes"])),
+                str(_pick(payload, "odometer", default=current["odometer"])),
+                str(_pick(payload, "fuelLevel", "fuel_level", default=current["fuelLevel"])),
+                _json_dump(_pick(payload, "photos", default=current["photos"])),
+                json.dumps(_pick(payload, "customLabels", "custom_labels", default=current["customLabels"]), ensure_ascii=True),
+                str(checkout_val),
+                _json_dump(_pick(payload, "comments", default=current["comments"])),
+                report_id,
+            ),
+        )
+    return get_logreport(report_id)
 def create_logreport(payload: dict[str, Any]) -> dict[str, Any]:
     with _connect() as connection:
         cursor = connection.execute(
