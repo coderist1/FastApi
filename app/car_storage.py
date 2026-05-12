@@ -546,3 +546,37 @@ def list_logreports() -> list[dict[str, Any]]:
     with _connect() as connection:
         rows = connection.execute("SELECT * FROM logreports ORDER BY id DESC").fetchall()
         return [_report_row(row) for row in rows]
+
+
+def create_logreport(payload: dict[str, Any]) -> dict[str, Any]:
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO logreports (
+                type, vehicle_id, vehicle_name, rental_id, renter_name,
+                start_date, end_date, amount, issues, notes, odometer,
+                fuel_level, photos, custom_labels, checkout, comments
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(_pick(payload, "type", default="")),
+                int(_pick(payload, "vehicleId", "vehicle_id", default=0) or 0),
+                str(_pick(payload, "vehicleName", "vehicle_name", default="")),
+                int(_pick(payload, "rentalId", "rental_id", default=0) or 0),
+                str(_pick(payload, "renterName", "renter_name", default="")),
+                str(_pick(payload, "startDate", "start_date", default="")),
+                str(_pick(payload, "endDate", "end_date", default="")),
+                float(_pick(payload, "amount", default=0) or 0),
+                _json_dump(_pick(payload, "issues", default=[])),
+                str(_pick(payload, "notes", default="")),
+                str(_pick(payload, "odometer", default="")),
+                str(_pick(payload, "fuelLevel", "fuel_level", default="")),
+                _json_dump(_pick(payload, "photos", default=[])),
+                json.dumps(_pick(payload, "customLabels", "custom_labels", default={}), ensure_ascii=True),
+                str(_pick(payload, "checkout", default="")),
+                _json_dump(_pick(payload, "comments", default=[])),
+            ),
+        )
+        row = connection.execute("SELECT * FROM logreports WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _report_row(row)

@@ -1,8 +1,9 @@
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import shutil
+from typing import List, Dict, Any
 from app.schemas import (
     RentalBookingInput, 
     PredictionOutput, 
@@ -14,6 +15,7 @@ from app.demand_model import demand_model_instance
 from .car_storage import (
     authenticate_user as car_authenticate_user,
     create_booking as car_create_booking,
+    create_logreport as car_create_logreport,
     create_vehicle as car_create_vehicle,
     delete_booking as car_delete_booking,
     delete_vehicle as car_delete_vehicle,
@@ -80,6 +82,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# WebSocket connection manager
+# ---------------------------------------------------------------------------
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: Dict[str, Any]):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except (WebSocketDisconnect, Exception):
+                self.disconnect(connection)
+
+manager = ConnectionManager()
 
 @app.get("/")
 def home():
@@ -283,6 +310,8 @@ def delete_reservation(booking_id: int):
 
 
 @app.get("/api/log-reports")
+@app.get("/api/logreports")
+@app.get("/api/logreports/")
 def get_log_reports():
     """Get user's rental history and reports"""
     return car_list_logreports()
@@ -295,6 +324,15 @@ def get_logs_alias():
     Must return an array payload.
     """
     return car_list_logreports()
+
+
+@app.post("/api/logreports")
+@app.post("/api/logreports/")
+def create_log_report(payload: dict):
+    try:
+        return car_create_logreport(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @app.get("/api/log-reports/{report_id}")
 def get_log_report(report_id: int):
@@ -380,3 +418,16 @@ def create_reservation(reservation_data: dict):
 def create_reservation_no_prefix(reservation_data: dict):
     """Create reservation endpoint without /api prefix"""
     return create_reservation(reservation_data)
+
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/sync/")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except (WebSocketDisconnect, Exception):
+        manager.disconnect(websocket)

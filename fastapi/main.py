@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
             admin = User(
                 email="admin@example.com",
                 username="admin@example.com",
-                password="secret123",
+                password="secret123",  # TODO: Hash password for production
                 firstName="Admin",
                 lastName="User",
                 middleName="",
@@ -33,6 +33,9 @@ async def lifespan(app: FastAPI):
             )
             db.add(admin)
             db.commit()
+    except Exception as e:
+        print(f"Failed to seed admin user: {e}")
+        db.rollback()
     finally:
         db.close()
     yield
@@ -570,12 +573,14 @@ async def delete_booking(booking_id: int, current_user: User = Depends(get_curre
 # Log report routes
 # ---------------------------------------------------------------------------
 
+@app.get("/api/logreports")
 @app.get("/api/logreports/")
 async def list_logreports(db: Session = Depends(get_db)):
     reports = db.query(LogReport).all()
     return [sanitize_logreport(r) for r in reports]
 
 
+@app.post("/api/logreports")
 @app.post("/api/logreports/")
 async def create_logreport(payload: LogReportPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     report = LogReport(
